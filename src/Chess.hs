@@ -1,5 +1,7 @@
 module Chess
-  ( Board,
+  ( Game (..),
+    GameInput (..),
+    Board,
     Rank,
     Square (..),
     Color (..),
@@ -7,17 +9,28 @@ module Chess
     PieceKind (..),
     RankId (..),
     FileId (..),
+    Tag (..),
+    Move (..),
+    MoveInput (..),
+    MoveInputSpecial (..),
+    CastlingSide (..),
+    Coord,
     startingBoard,
     movesBoard,
     displayBoard,
-    movements
+    movements,
+    allSquares,
+    resolveMoveInput,
+    runGameInput,
   )
 where
 
 import Control.Lens
+import Control.Monad
+import Data.Bifunctor (first)
 import Data.List (intercalate)
 import Data.Maybe
-import Control.Monad
+import Debug.Trace (trace, traceShowId)
 
 --
 -- Data Types
@@ -34,7 +47,7 @@ data PieceKind
   | Bishop
   | Queen
   | King
-  deriving (Show, Eq, Enum, Bounded)
+  deriving (Show, Read, Eq, Enum, Bounded)
 
 data Piece = Piece PieceKind Color
   deriving (Show, Eq)
@@ -67,9 +80,54 @@ data Square
   | MarkedSquare -- E.g. for displaying moves
   deriving (Show)
 
-data Move = Move Piece Coord Coord
+data Move
+  = Move Piece Coord Coord
+  | CastlingMove Color CastlingSide
+  deriving (Show)
 
-type GameState = (Board, [Move])
+-- Some move input (e.g. Standard Algebraic Notation) is ambiguous
+-- without the current game state.
+data MoveInput
+  = MoveInput Piece OptionalCoord Coord [MoveInputSpecial]
+  | CastlingMoveInput Color CastlingSide [MoveInputSpecial]
+  deriving (Show)
+
+data CastlingSide
+  = Queenside
+  | Kingside
+  deriving (Show)
+
+data MoveInputSpecial
+  = Check
+  | Checkmate
+  | Capture
+  | Promotion PieceKind
+  deriving (Show)
+
+data Tag = Tag TagType String
+  deriving (Show)
+
+data TagType
+  = TagEvent
+  | TagSite
+  | TagDate
+  | TagRound
+  | TagWhite
+  | TagBlack
+  | TagResult
+  deriving (Show, Read, Enum, Bounded)
+
+data Game = Game
+  { board :: Board,
+    moves :: [Move]
+  }
+  deriving (Show)
+
+data GameInput = GameInput
+  { moveInputs :: [MoveInput],
+    tags :: [Tag]
+  }
+  deriving (Show)
 
 data RankId
   = Rank1
@@ -94,6 +152,9 @@ data FileId
   deriving (Show, Eq, Enum, Bounded)
 
 type Coord = (FileId, RankId)
+
+-- May specify file+rank, only file, only rank, or nothing.
+type OptionalCoord = (Maybe FileId, Maybe RankId)
 
 --
 -- Board Construction
@@ -133,10 +194,13 @@ startingBoard =
     pawnRank White,
     pieceRank White
   )
-  
+
 emptyBoard :: Board
 emptyBoard = boardOf emptyRank
-  
+
+startingGame :: Game
+startingGame = Game {board = startingBoard, moves = []}
+
 movesBoard :: Piece -> Coord -> Board
 movesBoard piece coord = foldr markSquare board (movements piece coord board)
   where
@@ -147,6 +211,12 @@ allRankIds = enumFrom minBound
 
 allFileIds :: [FileId]
 allFileIds = enumFrom minBound
+
+allCoords :: [Coord]
+allCoords = [(file, rank) | rank <- reverse allRankIds, file <- allFileIds]
+
+allTagTypes :: [TagType]
+allTagTypes = enumFrom minBound
 
 -- Lenses
 
@@ -178,6 +248,41 @@ coordLens (fileId, rankId) = rankLens rankId . fileLens fileId
 -- Moves
 --
 
+runGameInput :: GameInput -> Either (String, Game) Game
+runGameInput GameInput {moveInputs = moveInputs} = applyMoveInputs startingGame moveInputs
+
+applyMoveInputs :: Game -> [MoveInput] -> Either (String, Game) Game
+applyMoveInputs = foldM applyMoveInput
+
+applyMove :: Game -> Move -> Either (String, Game) Game
+applyMove game@Game {board = board, moves = moves} move@(Move piece origin dest)
+  | isMoveAllowed board dest (piece, origin) =
+    Right $
+      trace (displayBoard $ movePiece board) game {board = movePiece board, moves = move : moves}
+  | otherwise =
+    Left ("Move not allowed for " ++ show piece ++ " at " ++ show origin, game)
+  where
+    movePiece board = putSquare origin EmptySquare (putSquare dest (OccupiedSquare piece) board)
+
+applyMoveInput :: Game -> MoveInput -> Either (String, Game) Game
+applyMoveInput game moveInput =
+  case resolveMoveInput (board game) moveInput of
+    Left error -> Left (error, game)
+    Right move -> applyMove game move
+
+resolveMoveInput :: Board -> MoveInput -> Either String Move
+resolveMoveInput board (MoveInput piece optionalOrigin dest special) =
+  case filter moveAllowed candidates of
+    [] -> Left "Unable to find"
+    [(piece, resolvedOrigin)] -> Right (Move piece resolvedOrigin dest)
+  where
+    moveAllowed = isMoveAllowed board dest
+    candidates = findPieces board (piece, optionalOrigin)
+resolveMoveInput board _ = Left "unhandled" -- TODO: castling
+
+getSquare :: Coord -> Board -> Square
+getSquare coord = view (coordLens coord)
+
 putSquare :: Coord -> Square -> Board -> Board
 putSquare coord = set (coordLens coord)
 
@@ -187,42 +292,42 @@ emptySquare coord = putSquare coord EmptySquare
 markSquare :: Coord -> Board -> Board
 markSquare coord = putSquare coord MarkedSquare
 
-movePiece :: Coord -> Piece -> Board -> Either Board String
-movePiece coord piece board = case findPiece piece board of
-  Just curCoord -> Left $ putSquare coord (OccupiedSquare piece) (emptySquare curCoord board)
-  Nothing -> Right "Piece does not exist"
-
-findPiece :: Piece -> Board -> Maybe Coord
-findPiece piece board = findPiece' piece $ zip ((^.. each) board) (reverse allRankIds)
-  where
-    findPiece' piece ((rank, rankId) : ranks) =
-      case findPieceInRank piece rank of
-        Just fileId -> Just (fileId, rankId)
-        Nothing -> findPiece' piece ranks
-    findPiece' piece [] = Nothing
-
-findPieceInRank :: Piece -> Rank -> Maybe FileId
-findPieceInRank piece (a, b, c, d, e, f, g, h)
-  | hasPiece a = Just FileA
-  | hasPiece b = Just FileB
-  | hasPiece c = Just FileC
-  | hasPiece d = Just FileD
-  | hasPiece e = Just FileE
-  | hasPiece f = Just FileF
-  | hasPiece g = Just FileG
-  | hasPiece h = Just FileH
-  | otherwise = Nothing
-  where
-    hasPiece = containsPiece piece
-
-containsPiece :: Piece -> Square -> Bool
-containsPiece _ EmptySquare = False
-containsPiece piece (OccupiedSquare otherPiece) = piece == otherPiece
-
-isOccupied :: Coord -> Board -> Bool
-isOccupied coord board = case view (coordLens coord) board of
+isCoordOccupied :: Board -> Coord -> Bool
+isCoordOccupied board coord = case getSquare coord board of
   OccupiedSquare _ -> True
   _ -> False
+
+isSquareOccupied :: Square -> Bool
+isSquareOccupied (OccupiedSquare _) = True
+isSquareOccupied _ = False
+
+allSquares :: Board -> [(Square, Coord)]
+allSquares board = zip squares allCoords
+  where
+    squares = concatMap (^.. each) ((^.. each) board)
+
+allPieces :: Board -> [(Piece, Coord)]
+allPieces board = map (first justPiece) occupiedSquares
+  where
+    occupiedSquares = filter (\(s, c) -> isSquareOccupied s) (allSquares board)
+
+justPiece :: Square -> Piece
+justPiece (OccupiedSquare piece) = piece
+
+findPieces :: Board -> (Piece, OptionalCoord) -> [(Piece, Coord)]
+findPieces board (piece, partialCoord) =
+  filter
+    (\(p, c) -> p == piece && isPartialCoordMatch partialCoord c)
+    (allPieces board)
+
+isPartialCoordMatch :: (Maybe FileId, Maybe RankId) -> Coord -> Bool
+isPartialCoordMatch (Nothing, Nothing) _ = True
+isPartialCoordMatch (Just file, Nothing) (f, _) = file == f
+isPartialCoordMatch (Nothing, Just rank) (_, r) = rank == r
+isPartialCoordMatch (Just file, Just rank) (f, r) = file == f && rank == r
+
+isMoveAllowed :: Board -> Coord -> (Piece, Coord) -> Bool
+isMoveAllowed board dest (piece, origin) = dest `elem` movements piece origin board
 
 -- TODO: castle
 movements :: Piece -> Coord -> Board -> [Coord]
@@ -266,8 +371,7 @@ movements (Piece Bishop _) coord board =
       downLeft,
       downRight
     ]
-    
-movements (Piece Knight _) coord board = 
+movements (Piece Knight _) coord board =
   concatMap
     (moveOnce coord board)
     [ right >=> down >=> down,
@@ -279,21 +383,19 @@ movements (Piece Knight _) coord board =
       left >=> left >=> up,
       left >=> left >=> down
     ]
-
 -- TODO: en passant
 movements (Piece Pawn White) coord board =
   case coord of
     (_, Rank2) -> moveTwice coord board up
     _ -> moveOnce coord board up
-
 movements (Piece Pawn Black) coord board =
   case coord of
     (_, Rank7) -> moveTwice coord board down
-    _ -> moveOnce coord board up
+    _ -> moveOnce coord board down
 
 moveOnce :: Coord -> Board -> (Coord -> Maybe Coord) -> [Coord]
 moveOnce coord board f = case f coord of
-  Just coord' -> [coord' | not (isOccupied coord' board)]
+  Just coord' -> [coord' | not (isCoordOccupied board coord')]
   Nothing -> []
 
 moveTwice :: Coord -> Board -> (Coord -> Maybe Coord) -> [Coord]
@@ -305,7 +407,7 @@ moveMultiple :: Coord -> Board -> (Coord -> Maybe Coord) -> [Coord]
 moveMultiple coord board f = case moveOnce coord board f of
   [] -> []
   [coord'] -> coord' : moveMultiple coord' board f
-  
+
 up :: Coord -> Maybe Coord
 up (f, r) = if r == maxBound then Nothing else Just (f, succ r)
 

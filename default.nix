@@ -7,7 +7,8 @@ in
       pkgs.haskell.lib.addBuildTools drv (with pkgs.haskellPackages;
         [ cabal-install
           ghcid
-	  lens
-	  haskell-language-server
+          lens
+          pretty-show
+          haskell-language-server
         ]);
   }
