@@ -50,6 +50,7 @@ executable zugzwang
     -- other-extensions:
     build-depends:
         base ^>=4.15.1.0,
+        cmdargs ^>=0.10,
         zugzwang
 
     hs-source-dirs:   app

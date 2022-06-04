@@ -1,4 +1,12 @@
-module Chess.PortableGameNotation (parseGame, move, tag) where
+module Chess.PortableGameNotation
+  ( parseCoord,
+    parsePortableGameFile,
+    parsePieceKind,
+    parseMoveInput,
+    move,
+    tag,
+  )
+where
 
 import Chess
   ( CastlingSide (..),
@@ -16,6 +24,7 @@ import Chess
   )
 import Data.Char (isSpace)
 import Data.Maybe
+import Debug.Trace
 import Text.Parsec
 import Text.Parsec.Token
 
@@ -44,15 +53,18 @@ tagNames =
     "Site",
     "Date",
     "Round",
+    "WhiteElo",
+    "BlackElo",
     "White",
     "Black",
-    "Result"
+    "Result",
+    "ECO"
   ]
 
 tag :: Parsec String () Tag
 tag = do
   char '['
-  tagType <- choice (map (try . string) tagNames)
+  tagType <- choice $ map (try . string) tagNames
   many1 space'
   tagContents <- between doubleQuote doubleQuote (many (noneOf "[]\""))
   char ']'
@@ -68,8 +80,8 @@ tag = do
 -- TODO: Support semicolon to EOL style.
 comment :: Parsec String () String
 comment = do
-  parserTraced "spaces" spaces'
-  parserTraced "between" $ between (char '{') (char '}') (many (noneOf "{}"))
+  spaces'
+  between (char '{') (char '}') (many (noneOf "{}"))
 
 --
 -- Piece Kind
@@ -153,10 +165,10 @@ checkmate = do char '#'; return Checkmate
 
 move :: Color -> Parsec String () MoveInput
 move color =
-  parserTraced "disambiguatedMove" (try (disambiguatedMove color))
-    <|> parserTraced "ambiguousMove" (try (ambiguousMove color))
-    <|> parserTraced "castling" (castlingMove color)
-    
+  try (disambiguatedMove color)
+    <|> try (ambiguousMove color)
+    <|> castlingMove color
+
 -- TODO: Promotion (e.g. e8=Q)
 
 -- A move input without a deparature rank or file specified. Is ambiguous without
@@ -174,7 +186,7 @@ ambiguousMove color = do
       destination
       (catMaybes [maybeCapture, maybeCheckOrCheckmate])
 
--- A move input that specifies a deparature rank and/or file. 
+-- A move input that specifies a deparature rank and/or file.
 disambiguatedMove :: Color -> Parsec String () MoveInput
 disambiguatedMove color = do
   pieceKind <- option Pawn pieceKind
@@ -207,17 +219,17 @@ castlingMove color = do
 
 movePairOrSingleMove :: Parsec String () [MoveInput]
 movePairOrSingleMove =
-  parserTraced "movePair" (try movePair) <|> parserTraced "singleMove" singleMove
+  try movePair <|> try singleMove
 
 movePair :: Parsec String () [MoveInput]
 movePair = do
-  parserTraced "moveNum" moveNumber
-  moveA <- parserTraced "whiteMove" (move White)
-  parserTraced "spaces" (many1 space')
-  parserTraced "comment" (optional comment)
-  moveB <- parserTraced "blackMove" (move Black)
+  moveNumber
+  moveA <- move White
+  many1 space'
+  optional (try comment)
+  moveB <- move Black
   -- parserTraced "comment" (try $ optional comment)
-  parserTraced "endOfGame" (optional $ try endOfGame)
+  optional (try endOfGame)
 
   return [moveA, moveB]
 
@@ -225,7 +237,8 @@ singleMove :: Parsec String () [MoveInput]
 singleMove = do
   moveNumber
   move' <- move White
-  optional comment
+  optional (try comment)
+  many space'
   endOfGame -- If single, must be the final move and include end of game result.
   return [move']
 
@@ -272,11 +285,24 @@ endOfGame = do
 --   35. Ra7 g6 36. Ra6+ Kc5 37. Ke1 Nf4 38. g3 Nxh3 39. Kd2 Kb5 40. Rd6 Kc5 41. Ra6
 --   Nf2 42. g4 Bd3 43. Re6 1/2-1/2
 
-pgnFile :: Parsec String () GameInput
-pgnFile = do
-  tags <- sepEndBy tag newline
-  nestedMoveInputs <- sepEndBy1 movePairOrSingleMove (newline <|> space)
+portableGame :: Parsec String () GameInput
+portableGame = do
+  tags <- sepEndBy tag (many1 endOfLine)
+  many endOfLine
+  nestedMoveInputs <- sepEndBy1 movePairOrSingleMove (many1 endOfLine <|> many1 space)
   return GameInput {moveInputs = concat nestedMoveInputs, tags = tags}
 
-parseGame :: String -> Either ParseError GameInput
-parseGame = parse pgnFile "(unknown)"
+portableGameFile :: Parsec String () [GameInput]
+portableGameFile = many1 portableGame
+
+parsePortableGameFile :: String -> Either ParseError [GameInput]
+parsePortableGameFile = parse portableGameFile "(unknown)"
+
+parseMoveInput :: Color -> String -> Either ParseError MoveInput
+parseMoveInput color = parse (move color) "(unknown)"
+
+parsePieceKind :: String -> Either ParseError PieceKind
+parsePieceKind = parse pieceKind "(unknown)"
+
+parseCoord :: String -> Either ParseError Coord
+parseCoord = parse coord "(unknown)"

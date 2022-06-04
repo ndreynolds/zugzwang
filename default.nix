@@ -9,6 +9,7 @@ in
           ghcid
           lens
           pretty-show
+          cmdargs
           haskell-language-server
         ]);
   }
